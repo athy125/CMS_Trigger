@@ -1,5 +1,3 @@
-// CMS L1 Trigger Simulation Framework
-
 #include <iostream>
 #include <vector>
 #include <queue>
@@ -9,160 +7,157 @@
 #include <condition_variable>
 #include <atomic>
 #include <chrono>
-#include <algorithm>
 #include <memory>
-#include <functional>
+#include <cmath>
+#include <algorithm>
 
-// Namespace to encompass all CMS L1 Trigger related classes
-namespace CMSL1Trigger {
+// Namespace for CMS L1 Trigger simulation
+namespace CMSL1Sim {
 
-// Forward declarations
-class Event;
-class DetectorData;
-class TriggerSystem;
-
-// Simulated detector data components
-enum DetectorComponent {
-    ECAL,  // Electromagnetic Calorimeter
-    HCAL,  // Hadronic Calorimeter
-    MUON,  // Muon Chambers
-    TRACKER // Silicon Tracker
+enum DetectorType {
+    ECAL,    // Electromagnetic Calorimeter
+    HCAL,    // Hadronic Calorimeter
+    MUON,    // Muon System
+    TRACKER  // Silicon Tracker
 };
 
-// Structure to represent particle candidates found in the detector
-struct ParticleCandidate {
-    enum Type { ELECTRON, PHOTON, MUON, TAU, JET, MET };
-    
-    Type type;
-    double pt;        // Transverse momentum
+// Particle types for trigger candidates
+enum ParticleType {
+    ELECTRON,
+    PHOTON,
+    MUON,
+    JET,
+    TAU,
+    MET  // Missing Transverse Energy
+};
+
+// Structure for trigger candidates
+struct TriggerCandidate {
+    ParticleType type;
+    double pt;        // Transverse momentum (GeV)
     double eta;       // Pseudorapidity
-    double phi;       // Azimuthal angle
-    double energy;
-    bool isolated;    // Isolation flag for leptons
+    double phi;       // Azimuthal angle (radians)
+    double energy;    // Total energy (GeV)
+    bool isolated;    // Isolation flag
     
-    ParticleCandidate(Type t, double p, double e, double ph, double en, bool iso = false)
+    TriggerCandidate(ParticleType t, double p, double e, double ph, double en, bool iso = false)
         : type(t), pt(p), eta(e), phi(ph), energy(en), isolated(iso) {}
 };
 
-// Base class for detector subsystem data
-class DetectorData {
+// Base class for detector data
+class DetectorLayer {
 protected:
-    DetectorComponent component;
-    std::vector<std::vector<double>> energyDeposits; // Simplified 2D array of energy deposits
+    DetectorType type;
+    std::vector<std::vector<double>> energyMap;  // 2D grid of energy deposits
+    int etaBins, phiBins;
     
 public:
-    DetectorData(DetectorComponent comp, int etaBins, int phiBins)
-        : component(comp), 
-          energyDeposits(etaBins, std::vector<double>(phiBins, 0.0)) {}
+    DetectorLayer(DetectorType t, int eBins, int pBins)
+        : type(t), etaBins(eBins), phiBins(pBins),
+          energyMap(eBins, std::vector<double>(pBins, 0.0)) {}
     
-    virtual ~DetectorData() = default;
+    virtual ~DetectorLayer() = default;
     
-    DetectorComponent getComponent() const { return component; }
-    
-    void setEnergyDeposit(int etaBin, int phiBin, double energy) {
-        if (etaBin >= 0 && etaBin < static_cast<int>(energyDeposits.size()) &&
-            phiBin >= 0 && phiBin < static_cast<int>(energyDeposits[0].size())) {
-            energyDeposits[etaBin][phiBin] = energy;
+    void depositEnergy(int etaIdx, int phiIdx, double energy) {
+        if (etaIdx >= 0 && etaIdx < etaBins && phiIdx >= 0 && phiIdx < phiBins) {
+            energyMap[etaIdx][phiIdx] += energy;
         }
     }
     
-    double getEnergyDeposit(int etaBin, int phiBin) const {
-        if (etaBin >= 0 && etaBin < static_cast<int>(energyDeposits.size()) &&
-            phiBin >= 0 && phiBin < static_cast<int>(energyDeposits[0].size())) {
-            return energyDeposits[etaBin][phiBin];
+    double getEnergy(int etaIdx, int phiIdx) const {
+        if (etaIdx >= 0 && etaIdx < etaBins && phiIdx >= 0 && phiIdx < phiBins) {
+            return energyMap[etaIdx][phiIdx];
         }
         return 0.0;
     }
     
-    int getEtaBins() const { return energyDeposits.size(); }
-    int getPhiBins() const { return energyDeposits.empty() ? 0 : energyDeposits[0].size(); }
+    void clear() {
+        for (auto& row : energyMap) {
+            std::fill(row.begin(), row.end(), 0.0);
+        }
+    }
+    
+    int getEtaBins() const { return etaBins; }
+    int getPhiBins() const { return phiBins; }
+    DetectorType getType() const { return type; }
 };
 
-// Concrete detector subsystem data classes
-class ECALData : public DetectorData {
+// Specific detector implementations
+class ECALLayer : public DetectorLayer {
 public:
-    ECALData() : DetectorData(ECAL, 72, 72) {} // Simplified ECAL granularity
+    ECALLayer() : DetectorLayer(ECAL, 140, 360) {}  // Fine granularity
 };
 
-class HCALData : public DetectorData {
+class HCALLayer : public DetectorLayer {
 public:
-    HCALData() : DetectorData(HCAL, 72, 72) {} // Simplified HCAL granularity
+    HCALLayer() : DetectorLayer(HCAL, 82, 72) {}    // Coarser granularity
 };
 
-class MuonData : public DetectorData {
+class MuonLayer : public DetectorLayer {
 public:
-    MuonData() : DetectorData(MUON, 36, 36) {} // Simplified Muon granularity
+    MuonLayer() : DetectorLayer(MUON, 48, 48) {}    // Simplified muon system
 };
 
-class TrackerData : public DetectorData {
+class TrackerLayer : public DetectorLayer {
 public:
-    TrackerData() : DetectorData(TRACKER, 100, 180) {} // Simplified Tracker granularity
+    TrackerLayer() : DetectorLayer(TRACKER, 200, 360) {}  // High resolution
 };
 
-// Class representing a complete detector event
-class Event {
+// Event class representing a collision
+class CollisionEvent {
 private:
     uint64_t eventId;
-    std::unique_ptr<ECALData> ecalData;
-    std::unique_ptr<HCALData> hcalData;
-    std::unique_ptr<MuonData> muonData;
-    std::unique_ptr<TrackerData> trackerData;
-    std::vector<ParticleCandidate> triggerCandidates;
-    bool passed;
+    std::unique_ptr<ECALLayer> ecal;
+    std::unique_ptr<HCALLayer> hcal;
+    std::unique_ptr<MuonLayer> muon;
+    std::unique_ptr<TrackerLayer> tracker;
+    std::vector<TriggerCandidate> candidates;
+    bool triggerDecision;
+    std::chrono::nanoseconds timestamp;
     
 public:
-    Event(uint64_t id) : eventId(id), 
-                         ecalData(std::make_unique<ECALData>()),
-                         hcalData(std::make_unique<HCALData>()),
-                         muonData(std::make_unique<MuonData>()),
-                         trackerData(std::make_unique<TrackerData>()),
-                         passed(false) {}
+    CollisionEvent(uint64_t id)
+        : eventId(id), ecal(std::make_unique<ECALLayer>()),
+          hcal(std::make_unique<HCALLayer>()), muon(std::make_unique<MuonLayer>()),
+          tracker(std::make_unique<TrackerLayer>()), triggerDecision(false),
+          timestamp(std::chrono::high_resolution_clock::now().time_since_epoch()) {}
     
-    uint64_t getEventId() const { return eventId; }
+    uint64_t getId() const { return eventId; }
+    ECALLayer* getECAL() { return ecal.get(); }
+    HCALLayer* getHCAL() { return hcal.get(); }
+    MuonLayer* getMuon() { return muon.get(); }
+    TrackerLayer* getTracker() { return tracker.get(); }
     
-    ECALData* getECALData() { return ecalData.get(); }
-    HCALData* getHCALData() { return hcalData.get(); }
-    MuonData* getMuonData() { return muonData.get(); }
-    TrackerData* getTrackerData() { return trackerData.get(); }
+    void addCandidate(const TriggerCandidate& cand) { candidates.push_back(cand); }
+    const std::vector<TriggerCandidate>& getCandidates() const { return candidates; }
     
-    void addTriggerCandidate(const ParticleCandidate& candidate) {
-        triggerCandidates.push_back(candidate);
-    }
+    void setTriggerDecision(bool decision) { triggerDecision = decision; }
+    bool passedTrigger() const { return triggerDecision; }
     
-    const std::vector<ParticleCandidate>& getTriggerCandidates() const {
-        return triggerCandidates;
-    }
-    
-    void setPassedTrigger(bool pass) { passed = pass; }
-    bool hasPassedTrigger() const { return passed; }
+    std::chrono::nanoseconds getTimestamp() const { return timestamp; }
 };
 
-// Base class for trigger algorithm components
-class TriggerAlgorithm {
+// Base class for trigger algorithms
+class TriggerLogic {
 protected:
     std::string name;
-    double threshold;
+    double ptThreshold;
     
 public:
-    TriggerAlgorithm(const std::string& n, double t) : name(n), threshold(t) {}
-    virtual ~TriggerAlgorithm() = default;
-    
-    virtual bool evaluate(const Event& event) = 0;
-    
+    TriggerLogic(const std::string& n, double pt) : name(n), ptThreshold(pt) {}
+    virtual ~TriggerLogic() = default;
+    virtual bool evaluate(const CollisionEvent& event) = 0;
     std::string getName() const { return name; }
-    double getThreshold() const { return threshold; }
 };
 
-// Concrete trigger algorithms
-class SingleMuonTrigger : public TriggerAlgorithm {
+// Specific trigger implementations
+class SingleMuonLogic : public TriggerLogic {
 public:
-    SingleMuonTrigger(double ptThreshold) 
-        : TriggerAlgorithm("SingleMuon", ptThreshold) {}
+    SingleMuonLogic(double ptThresh) : TriggerLogic("SingleMuon", ptThresh) {}
     
-    bool evaluate(const Event& event) override {
-        for (const auto& candidate : event.getTriggerCandidates()) {
-            if (candidate.type == ParticleCandidate::MUON && 
-                candidate.pt > threshold) {
+    bool evaluate(const CollisionEvent& event) override {
+        for (const auto& cand : event.getCandidates()) {
+            if (cand.type == MUON && cand.pt > ptThreshold && cand.isolated) {
                 return true;
             }
         }
@@ -170,289 +165,171 @@ public:
     }
 };
 
-class SingleElectronTrigger : public TriggerAlgorithm {
-public:
-    SingleElectronTrigger(double ptThreshold) 
-        : TriggerAlgorithm("SingleElectron", ptThreshold) {}
-    
-    bool evaluate(const Event& event) override {
-        for (const auto& candidate : event.getTriggerCandidates()) {
-            if (candidate.type == ParticleCandidate::ELECTRON && 
-                candidate.pt > threshold && candidate.isolated) {
-                return true;
-            }
-        }
-        return false;
-    }
-};
-
-class DoubleMuonTrigger : public TriggerAlgorithm {
-private:
-    double secondThreshold;
-    
-public:
-    DoubleMuonTrigger(double ptThreshold1, double ptThreshold2) 
-        : TriggerAlgorithm("DoubleMuon", ptThreshold1), 
-          secondThreshold(ptThreshold2) {}
-    
-    bool evaluate(const Event& event) override {
-        int muonsAboveThreshold = 0;
-        int muonsAboveSecondThreshold = 0;
-        
-        for (const auto& candidate : event.getTriggerCandidates()) {
-            if (candidate.type == ParticleCandidate::MUON) {
-                if (candidate.pt > threshold) {
-                    muonsAboveThreshold++;
-                }
-                if (candidate.pt > secondThreshold) {
-                    muonsAboveSecondThreshold++;
-                }
-            }
-        }
-        
-        return (muonsAboveThreshold >= 1 && muonsAboveSecondThreshold >= 2);
-    }
-};
-
-class JetTrigger : public TriggerAlgorithm {
+class DiJetLogic : public TriggerLogic {
 private:
     int minJets;
     
 public:
-    JetTrigger(double ptThreshold, int numJets) 
-        : TriggerAlgorithm("Jet", ptThreshold), minJets(numJets) {}
+    DiJetLogic(double ptThresh, int minJ) : TriggerLogic("DiJet", ptThresh), minJets(minJ) {}
     
-    bool evaluate(const Event& event) override {
-        int jetsAboveThreshold = 0;
-        
-        for (const auto& candidate : event.getTriggerCandidates()) {
-            if (candidate.type == ParticleCandidate::JET && 
-                candidate.pt > threshold) {
-                jetsAboveThreshold++;
+    bool evaluate(const CollisionEvent& event) override {
+        int jetCount = 0;
+        for (const auto& cand : event.getCandidates()) {
+            if (cand.type == JET && cand.pt > ptThreshold) {
+                jetCount++;
             }
         }
-        
-        return (jetsAboveThreshold >= minJets);
+        return jetCount >= minJets;
     }
 };
 
-// Main Trigger system class
-class TriggerSystem {
-private:
-    std::vector<std::unique_ptr<TriggerAlgorithm>> triggers;
-    std::thread processingThread;
-    std::mutex queueMutex;
-    std::condition_variable queueCondition;
-    std::queue<std::shared_ptr<Event>> eventQueue;
-    std::atomic<bool> running;
-    uint64_t eventsProcessed;
-    uint64_t eventsPassed;
+class ElectronPhotonLogic : public TriggerLogic {
+public:
+    ElectronPhotonLogic(double ptThresh) : TriggerLogic("ElectronPhoton", ptThresh) {}
     
-    // Method to be run in the processing thread
-    void processingLoop() {
-        while (running) {
-            std::shared_ptr<Event> currentEvent = nullptr;
-            
+    bool evaluate(const CollisionEvent& event) override {
+        for (const auto& cand : event.getCandidates()) {
+            if ((cand.type == ELECTRON || cand.type == PHOTON) && 
+                cand.pt > ptThreshold && cand.isolated) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+// Main L1 Trigger System
+class L1TriggerSystem {
+private:
+    std::vector<std::unique_ptr<TriggerLogic>> triggerMenu;
+    std::queue<std::shared_ptr<CollisionEvent>> eventQueue;
+    std::mutex queueMutex;
+    std::condition_variable queueCond;
+    std::thread processorThread;
+    std::atomic<bool> isRunning;
+    uint64_t processedEvents;
+    uint64_t passedEvents;
+    
+    void processEvents() {
+        while (isRunning) {
+            std::shared_ptr<CollisionEvent> event;
             {
                 std::unique_lock<std::mutex> lock(queueMutex);
-                queueCondition.wait(lock, [this] { 
-                    return !eventQueue.empty() || !running; 
-                });
+                queueCond.wait(lock, [this] { return !eventQueue.empty() || !isRunning; });
                 
-                if (!running && eventQueue.empty()) {
-                    break;
-                }
+                if (!isRunning && eventQueue.empty()) break;
+                if (eventQueue.empty()) continue;
                 
-                if (!eventQueue.empty()) {
-                    currentEvent = eventQueue.front();
-                    eventQueue.pop();
-                }
+                event = eventQueue.front();
+                eventQueue.pop();
             }
             
-            if (currentEvent) {
-                // Run trigger candidate reconstruction
-                reconstructCandidates(*currentEvent);
-                
-                // Evaluate trigger algorithms
-                bool passed = evaluateTriggers(*currentEvent);
-                currentEvent->setPassedTrigger(passed);
-                
-                // Update statistics
-                eventsProcessed++;
-                if (passed) {
-                    eventsPassed++;
-                }
-                
-                // Print trigger decision (for demonstration)
-                std::cout << "Event " << currentEvent->getEventId() 
-                          << (passed ? " PASSED" : " REJECTED") << std::endl;
-            }
+            reconstructCandidates(*event);
+            bool passed = evaluateTriggers(*event);
+            event->setTriggerDecision(passed);
+            
+            processedEvents++;
+            if (passed) passedEvents++;
+            
+            std::cout << "Event " << event->getId() << (passed ? " PASSED" : " REJECTED") 
+                      << " | Candidates: " << event->getCandidates().size() << std::endl;
         }
     }
     
-    // Reconstruct trigger candidates from detector data
-    void reconstructCandidates(Event& event) {
-        // Simplified reconstruction algorithms
-        
+    void reconstructCandidates(CollisionEvent& event) {
         // Muon reconstruction
-        for (int etaBin = 0; etaBin < event.getMuonData()->getEtaBins(); etaBin++) {
-            for (int phiBin = 0; phiBin < event.getMuonData()->getPhiBins(); phiBin++) {
-                double energy = event.getMuonData()->getEnergyDeposit(etaBin, phiBin);
-                if (energy > 5.0) {  // Energy threshold
-                    // Convert eta/phi bin to actual values (simplified)
-                    double eta = -3.0 + (6.0 * etaBin / event.getMuonData()->getEtaBins());
-                    double phi = -3.14 + (6.28 * phiBin / event.getMuonData()->getPhiBins());
-                    
-                    // Simple transverse momentum calculation
-                    double pt = energy * std::sin(2 * std::atan(std::exp(-eta)));
-                    
-                    // Add muon candidate
-                    event.addTriggerCandidate(ParticleCandidate(
-                        ParticleCandidate::MUON, pt, eta, phi, energy, true));
+        auto* muonLayer = event.getMuon();
+        for (int eta = 0; eta < muonLayer->getEtaBins(); eta++) {
+            for (int phi = 0; phi < muonLayer->getPhiBins(); phi++) {
+                double energy = muonLayer->getEnergy(eta, phi);
+                if (energy > 5.0) {  // Threshold for muon hit
+                    double etaVal = -2.4 + (4.8 * eta) / muonLayer->getEtaBins();
+                    double phiVal = -M_PI + (2 * M_PI * phi) / muonLayer->getPhiBins();
+                    double pt = energy * std::sin(2 * std::atan(std::exp(-etaVal)));
+                    event.addCandidate(TriggerCandidate(MUON, pt, etaVal, phiVal, energy, true));
                 }
             }
         }
         
-        // Electron/Photon reconstruction (combines ECAL and Tracker)
-        for (int etaBin = 0; etaBin < event.getECALData()->getEtaBins(); etaBin++) {
-            for (int phiBin = 0; phiBin < event.getECALData()->getPhiBins(); phiBin++) {
-                double energy = event.getECALData()->getEnergyDeposit(etaBin, phiBin);
-                if (energy > 2.0) {  // Energy threshold
-                    // Convert eta/phi bin to actual values
-                    double eta = -3.0 + (6.0 * etaBin / event.getECALData()->getEtaBins());
-                    double phi = -3.14 + (6.28 * phiBin / event.getECALData()->getPhiBins());
-                    
-                    // Simple transverse energy calculation
-                    double pt = energy * std::sin(2 * std::atan(std::exp(-eta)));
-                    
-                    // Check if there's corresponding tracker activity (for electrons)
-                    int trackerEtaBin = static_cast<int>((eta + 3.0) * event.getTrackerData()->getEtaBins() / 6.0);
-                    int trackerPhiBin = static_cast<int>((phi + 3.14) * event.getTrackerData()->getPhiBins() / 6.28);
-                    
-                    bool hasTrack = false;
-                    if (trackerEtaBin >= 0 && trackerEtaBin < event.getTrackerData()->getEtaBins() &&
-                        trackerPhiBin >= 0 && trackerPhiBin < event.getTrackerData()->getPhiBins()) {
-                        hasTrack = event.getTrackerData()->getEnergyDeposit(trackerEtaBin, trackerPhiBin) > 0.5;
-                    }
-                    
-                    // Add electron or photon candidate
-                    if (hasTrack) {
-                        // Calculate isolation (simplified)
-                        bool isolated = true;
-                        for (int dEta = -1; dEta <= 1; dEta++) {
-                            for (int dPhi = -1; dPhi <= 1; dPhi++) {
-                                if (dEta == 0 && dPhi == 0) continue;
-                                
-                                int neighborEta = etaBin + dEta;
-                                int neighborPhi = phiBin + dPhi;
-                                
-                                if (neighborEta >= 0 && neighborEta < event.getECALData()->getEtaBins() &&
-                                    neighborPhi >= 0 && neighborPhi < event.getECALData()->getPhiBins()) {
-                                    if (event.getECALData()->getEnergyDeposit(neighborEta, neighborPhi) > 1.0) {
-                                        isolated = false;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (!isolated) break;
-                        }
-                        
-                        event.addTriggerCandidate(ParticleCandidate(
-                            ParticleCandidate::ELECTRON, pt, eta, phi, energy, isolated));
-                    } else {
-                        event.addTriggerCandidate(ParticleCandidate(
-                            ParticleCandidate::PHOTON, pt, eta, phi, energy));
-                    }
-                }
+        // Jet reconstruction (simple clustering)
+        auto* hcal = event.getHCAL();
+        std::vector<std::vector<double>> jetEnergy(hcal->getEtaBins(), 
+                                                  std::vector<double>(hcal->getPhiBins(), 0.0));
+        
+        for (int eta = 0; eta < hcal->getEtaBins(); eta++) {
+            for (int phi = 0; phi < hcal->getPhiBins(); phi++) {
+                jetEnergy[eta][phi] = hcal->getEnergy(eta, phi) + 
+                                     event.getECAL()->getEnergy(eta * 2, phi * 5);  // Simplified mapping
             }
         }
         
-        // Jet reconstruction (using ECAL + HCAL)
-        std::vector<std::vector<double>> totalEnergy(
-            event.getHCALData()->getEtaBins(),
-            std::vector<double>(event.getHCALData()->getPhiBins(), 0.0));
-        
-        // Sum ECAL and HCAL energies
-        for (int etaBin = 0; etaBin < event.getHCALData()->getEtaBins(); etaBin++) {
-            for (int phiBin = 0; phiBin < event.getHCALData()->getPhiBins(); phiBin++) {
-                // Get HCAL energy
-                double hcalEnergy = event.getHCALData()->getEnergyDeposit(etaBin, phiBin);
-                
-                // Map to corresponding ECAL bins (simplified)
-                int ecalEtaBin = etaBin * event.getECALData()->getEtaBins() / event.getHCALData()->getEtaBins();
-                int ecalPhiBin = phiBin * event.getECALData()->getPhiBins() / event.getHCALData()->getPhiBins();
-                
-                double ecalEnergy = 0.0;
-                if (ecalEtaBin >= 0 && ecalEtaBin < event.getECALData()->getEtaBins() &&
-                    ecalPhiBin >= 0 && ecalPhiBin < event.getECALData()->getPhiBins()) {
-                    ecalEnergy = event.getECALData()->getEnergyDeposit(ecalEtaBin, ecalPhiBin);
-                }
-                
-                totalEnergy[etaBin][phiBin] = hcalEnergy + ecalEnergy;
-            }
-        }
-        
-        // Simple jet finding algorithm
-        for (int etaBin = 0; etaBin < static_cast<int>(totalEnergy.size()); etaBin++) {
-            for (int phiBin = 0; phiBin < static_cast<int>(totalEnergy[0].size()); phiBin++) {
-                if (totalEnergy[etaBin][phiBin] > 10.0) {  // Energy threshold for jet seed
-                    bool isLocalMaximum = true;
-                    
-                    // Check if it's a local maximum
-                    for (int dEta = -1; dEta <= 1 && isLocalMaximum; dEta++) {
+        for (int eta = 0; eta < hcal->getEtaBins(); eta++) {
+            for (int phi = 0; phi < hcal->getPhiBins(); phi++) {
+                if (jetEnergy[eta][phi] > 15.0) {
+                    bool isMax = true;
+                    for (int dEta = -1; dEta <= 1 && isMax; dEta++) {
                         for (int dPhi = -1; dPhi <= 1; dPhi++) {
                             if (dEta == 0 && dPhi == 0) continue;
-                            
-                            int neighborEta = etaBin + dEta;
-                            int neighborPhi = phiBin + dPhi;
-                            
-                            // Check boundary
-                            if (neighborEta >= 0 && neighborEta < static_cast<int>(totalEnergy.size()) &&
-                                neighborPhi >= 0 && neighborPhi < static_cast<int>(totalEnergy[0].size())) {
-                                if (totalEnergy[neighborEta][neighborPhi] > totalEnergy[etaBin][phiBin]) {
-                                    isLocalMaximum = false;
-                                    break;
+                            int nEta = eta + dEta;
+                            int nPhi = phi + dPhi;
+                            if (nEta >= 0 && nEta < hcal->getEtaBins() && 
+                                nPhi >= 0 && nPhi < hcal->getPhiBins()) {
+                                if (jetEnergy[nEta][nPhi] > jetEnergy[eta][phi]) {
+                                    isMax = false;
                                 }
                             }
                         }
                     }
+                    if (isMax) {
+                        double etaVal = -4.7 + (9.4 * eta) / hcal->getEtaBins();
+                        double phiVal = -M_PI + (2 * M_PI * phi) / hcal->getPhiBins();
+                        double pt = jetEnergy[eta][phi] * std::sin(2 * std::atan(std::exp(-etaVal)));
+                        event.addCandidate(TriggerCandidate(JET, pt, etaVal, phiVal, jetEnergy[eta][phi]));
+                    }
+                }
+            }
+        }
+        
+        // Electron/Photon reconstruction
+        auto* ecal = event.getECAL();
+        for (int eta = 0; eta < ecal->getEtaBins(); eta++) {
+            for (int phi = 0; phi < ecal->getPhiBins(); phi++) {
+                double energy = ecal->getEnergy(eta, phi);
+                if (energy > 3.0) {
+                    double etaVal = -2.5 + (5.0 * eta) / ecal->getEtaBins();
+                    double phiVal = -M_PI + (2 * M_PI * phi) / ecal->getPhiBins();
+                    double pt = energy * std::sin(2 * std::atan(std::exp(-etaVal)));
                     
-                    if (isLocalMaximum) {
-                        // Calculate jet energy (including surrounding cells)
-                        double jetEnergy = 0.0;
-                        for (int dEta = -2; dEta <= 2; dEta++) {
-                            for (int dPhi = -2; dPhi <= 2; dPhi++) {
-                                int jetEtaBin = etaBin + dEta;
-                                int jetPhiBin = phiBin + dPhi;
-                                
-                                if (jetEtaBin >= 0 && jetEtaBin < static_cast<int>(totalEnergy.size()) &&
-                                    jetPhiBin >= 0 && jetPhiBin < static_cast<int>(totalEnergy[0].size())) {
-                                    jetEnergy += totalEnergy[jetEtaBin][jetPhiBin];
-                                }
+                    int trackEta = eta * 2;  // Simplified mapping
+                    int trackPhi = phi;
+                    bool hasTrack = event.getTracker()->getEnergy(trackEta, trackPhi) > 0.5;
+                    bool isolated = true;
+                    for (int dEta = -1; dEta <= 1; dEta++) {
+                        for (int dPhi = -1; dPhi <= 1; dPhi++) {
+                            if (dEta == 0 && dPhi == 0) continue;
+                            int nEta = eta + dEta;
+                            int nPhi = phi + dPhi;
+                            if (nEta >= 0 && nEta < ecal->getEtaBins() && 
+                                nPhi >= 0 && nPhi < ecal->getPhiBins()) {
+                                if (ecal->getEnergy(nEta, nPhi) > 1.0) isolated = false;
                             }
                         }
-                        
-                        // Convert eta/phi bin to actual values
-                        double eta = -3.0 + (6.0 * etaBin / totalEnergy.size());
-                        double phi = -3.14 + (6.28 * phiBin / totalEnergy[0].size());
-                        
-                        // Simple transverse energy calculation
-                        double pt = jetEnergy * std::sin(2 * std::atan(std::exp(-eta)));
-                        
-                        // Add jet candidate
-                        event.addTriggerCandidate(ParticleCandidate(
-                            ParticleCandidate::JET, pt, eta, phi, jetEnergy));
+                    }
+                    
+                    if (hasTrack) {
+                        event.addCandidate(TriggerCandidate(ELECTRON, pt, etaVal, phiVal, energy, isolated));
+                    } else {
+                        event.addCandidate(TriggerCandidate(PHOTON, pt, etaVal, phiVal, energy, isolated));
                     }
                 }
             }
         }
     }
     
-    // Evaluate all trigger algorithms
-    bool evaluateTriggers(const Event& event) {
-        for (const auto& trigger : triggers) {
+    bool evaluateTriggers(const CollisionEvent& event) {
+        for (const auto& trigger : triggerMenu) {
             if (trigger->evaluate(event)) {
-                std::cout << "  Passed trigger: " << trigger->getName() << std::endl;
+                std::cout << "  Trigger fired: " << trigger->getName() << std::endl;
                 return true;
             }
         }
@@ -460,415 +337,186 @@ private:
     }
     
 public:
-    TriggerSystem() : running(false), eventsProcessed(0), eventsPassed(0) {
-        // Add default triggers
-        triggers.push_back(std::make_unique<SingleMuonTrigger>(20.0));
-        triggers.push_back(std::make_unique<SingleElectronTrigger>(27.0));
-        triggers.push_back(std::make_unique<DoubleMuonTrigger>(17.0, 8.0));
-        triggers.push_back(std::make_unique<JetTrigger>(40.0, 4));
+    L1TriggerSystem() : isRunning(false), processedEvents(0), passedEvents(0) {
+        triggerMenu.push_back(std::make_unique<SingleMuonLogic>(25.0));
+        triggerMenu.push_back(std::make_unique<DiJetLogic>(50.0, 2));
+        triggerMenu.push_back(std::make_unique<ElectronPhotonLogic>(30.0));
     }
     
-    ~TriggerSystem() {
-        stop();
-    }
+    ~L1TriggerSystem() { stop(); }
     
     void start() {
-        if (!running) {
-            running = true;
-            processingThread = std::thread(&TriggerSystem::processingLoop, this);
-            std::cout << "Trigger system started" << std::endl;
+        if (!isRunning) {
+            isRunning = true;
+            processorThread = std::thread(&L1TriggerSystem::processEvents, this);
+            std::cout << "L1 Trigger System started\n";
         }
     }
     
     void stop() {
-        if (running) {
-            running = false;
-            queueCondition.notify_all();
-            if (processingThread.joinable()) {
-                processingThread.join();
-            }
-            std::cout << "Trigger system stopped" << std::endl;
+        if (isRunning) {
+            isRunning = false;
+            queueCond.notify_all();
+            if (processorThread.joinable()) processorThread.join();
+            std::cout << "L1 Trigger System stopped\n";
         }
     }
     
-    void addTrigger(std::unique_ptr<TriggerAlgorithm> trigger) {
-        triggers.push_back(std::move(trigger));
-    }
-    
-    void queueEvent(std::shared_ptr<Event> event) {
-        {
-            std::lock_guard<std::mutex> lock(queueMutex);
-            eventQueue.push(event);
-        }
-        queueCondition.notify_one();
-    }
-    
-    int getQueueSize() const {
+    void queueEvent(std::shared_ptr<CollisionEvent> event) {
         std::lock_guard<std::mutex> lock(queueMutex);
-        return eventQueue.size();
+        eventQueue.push(event);
+        queueCond.notify_one();
     }
     
-    uint64_t getEventsProcessed() const { return eventsProcessed; }
-    uint64_t getEventsPassed() const { return eventsPassed; }
-    double getAcceptanceRate() const { 
-        return eventsProcessed > 0 ? static_cast<double>(eventsPassed) / eventsProcessed : 0.0;
+    uint64_t getProcessedEvents() const { return processedEvents; }
+    uint64_t getPassedEvents() const { return passedEvents; }
+    double getEfficiency() const { 
+        return processedEvents > 0 ? static_cast<double>(passedEvents) / processedEvents : 0.0;
     }
 };
 
-// Event Generator class to simulate detector data
+// Event generator simulating physics processes
 class EventGenerator {
 private:
     std::mt19937 rng;
-    uint64_t nextEventId;
+    uint64_t eventCounter;
     
-    // Different physics processes to simulate
-    enum PhysicsProcess {
-        MINIMUM_BIAS,
-        W_PRODUCTION,
-        Z_PRODUCTION,
-        TTBAR_PRODUCTION,
-        HIGGS_PRODUCTION
+    enum ProcessType {
+        QCD,        // Minimum bias
+        SINGLE_LEP, // W production
+        DILEP,      // Z production
+        MULTIJET    // ttbar-like
     };
     
-    // Simulate specific physics processes
-    void simulatePhysicsProcess(Event& event, PhysicsProcess process) {
-        switch (process) {
-            case MINIMUM_BIAS: {
-                // Simulate low-energy QCD interactions (noise)
-                std::uniform_int_distribution<int> numDeposits(10, 30);
-                int deposits = numDeposits(rng);
-                
-                for (int i = 0; i < deposits; i++) {
-                    fillRandomEnergyDeposit(event, 0.1, 5.0);
-                }
-                break;
-            }
-            
-            case W_PRODUCTION: {
-                // Simulate W->eν or W->μν
-                std::bernoulli_distribution electronMode(0.5);
-                bool isElectron = electronMode(rng);
-                
-                if (isElectron) {
-                    // W->eν: High-energy electron and missing ET
-                    simulateElectron(event, 30.0, 60.0);
-                } else {
-                    // W->μν: High-energy muon and missing ET
-                    simulateMuon(event, 30.0, 60.0);
-                }
-                break;
-            }
-            
-            case Z_PRODUCTION: {
-                // Simulate Z->ee or Z->μμ
-                std::bernoulli_distribution electronMode(0.5);
-                bool isElectron = electronMode(rng);
-                
-                if (isElectron) {
-                    // Z->ee: Two high-energy electrons
-                    simulateElectron(event, 25.0, 50.0);
-                    simulateElectron(event, 25.0, 50.0);
-                } else {
-                    // Z->μμ: Two high-energy muons
-                    simulateMuon(event, 25.0, 50.0);
-                    simulateMuon(event, 25.0, 50.0);
-                }
-                break;
-            }
-            
-            case TTBAR_PRODUCTION: {
-                // Simulate ttbar: multiple jets, possibly leptons
-                int numJets = 4 + (std::uniform_int_distribution<int>(0, 2))(rng);
-                
-                for (int i = 0; i < numJets; i++) {
-                    simulateJet(event, 20.0, 100.0);
-                }
-                
-                // Possibly add a lepton
-                std::bernoulli_distribution hasLepton(0.4);
-                if (hasLepton(rng)) {
-                    std::bernoulli_distribution isElectron(0.5);
-                    if (isElectron(rng)) {
-                        simulateElectron(event, 25.0, 50.0);
-                    } else {
-                        simulateMuon(event, 25.0, 50.0);
+    void generateQCD(CollisionEvent& event) {
+        std::uniform_int_distribution<int> nHits(20, 50);
+        int hits = nHits(rng);
+        for (int i = 0; i < hits; i++) {
+            depositRandomEnergy(event, 0.5, 10.0);
+        }
+    }
+    
+    void generateSingleLepton(CollisionEvent& event) {
+        std::bernoulli_distribution lepType(0.5);
+        double energy = std::uniform_real_distribution<double>(30.0, 80.0)(rng);
+        double eta = std::uniform_real_distribution<double>(-2.4, 2.4)(rng);
+        double phi = std::uniform_real_distribution<double>(-M_PI, M_PI)(rng);
+        
+        int etaBin, phiBin;
+        if (lepType(rng)) {  // Muon
+            etaBin = static_cast<int>((eta + 2.4) * event.getMuon()->getEtaBins() / 4.8);
+            phiBin = static_cast<int>((phi + M_PI) * event.getMuon()->getPhiBins() / (2 * M_PI));
+            event.getMuon()->depositEnergy(etaBin, phiBin, energy);
+            etaBin = static_cast<int>((eta + 2.5) * event.getTracker()->getEtaBins() / 5.0);
+            phiBin = static_cast<int>((phi + M_PI) * event.getTracker()->getPhiBins() / (2 * M_PI));
+            event.getTracker()->depositEnergy(etaBin, phiBin, energy * 0.1);
+        } else {  // Electron
+            etaBin = static_cast<int>((eta + 2.5) * event.getECAL()->getEtaBins() / 5.0);
+            phiBin = static_cast<int>((phi + M_PI) * event.getECAL()->getPhiBins() / (2 * M_PI));
+            event.getECAL()->depositEnergy(etaBin, phiBin, energy);
+            etaBin = static_cast<int>((eta + 2.5) * event.getTracker()->getEtaBins() / 5.0);
+            event.getTracker()->depositEnergy(etaBin, phiBin, energy * 0.1);
+        }
+        depositRandomEnergy(event, 0.5, 5.0, 10);  // Background
+    }
+    
+    void generateDilepton(CollisionEvent& event) {
+        for (int i = 0; i < 2; i++) {
+            generateSingleLepton(event);
+        }
+    }
+    
+    void generateMultijet(CollisionEvent& event) {
+        std::uniform_int_distribution<int> nJets(3, 6);
+        int jets = nJets(rng);
+        for (int i = 0; i < jets; i++) {
+            double energy = std::uniform_real_distribution<double>(20.0, 100.0)(rng);
+            double eta = std::uniform_real_distribution<double>(-4.7, 4.7)(rng);
+            double phi = std::uniform_real_distribution<double>(-M_PI, M_PI)(rng);
+            int etaBin = static_cast<int>((eta + 4.7) * event.getHCAL()->getEtaBins() / 9.4);
+            int phiBin = static_cast<int>((phi + M_PI) * event.getHCAL()->getPhiBins() / (2 * M_PI));
+            for (int dEta = -1; dEta <= 1; dEta++) {
+                for (int dPhi = -1; dPhi <= 1; dPhi++) {
+                    int eBin = etaBin + dEta;
+                    int pBin = phiBin + dPhi;
+                    if (eBin >= 0 && eBin < event.getHCAL()->getEtaBins() &&
+                        pBin >= 0 && pBin < event.getHCAL()->getPhiBins()) {
+                        event.getHCAL()->depositEnergy(eBin, pBin, energy * 0.7);
+                        event.getECAL()->depositEnergy(eBin * 2, pBin * 5, energy * 0.3);
                     }
                 }
-                break;
-            }
-            
-            case HIGGS_PRODUCTION: {
-                // Simulate H->γγ or H->ZZ->4l
-                std::bernoulli_distribution diphotonMode(0.3);
-                
-                if (diphotonMode(rng)) {
-                    // H->γγ: Two high-energy photons
-                    simulatePhoton(event, 40.0, 70.0);
-                    simulatePhoton(event, 40.0, 70.0);
-                } else {
-                    // H->ZZ->4l: Four leptons (e or μ)
-                    for (int i = 0; i < 4; i++) {
-                        std::bernoulli_distribution isElectron(0.5);
-                        if (isElectron(rng)) {
-                            simulateElectron(event, 15.0, 40.0);
-                        } else {
-                            simulateMuon(event, 15.0, 40.0);
-                        }
-                    }
-                }
-                break;
             }
         }
-        
-        // Add some background noise to all events
-        std::uniform_int_distribution<int> numNoiseDeposits(5, 15);
-        int deposits = numNoiseDeposits(rng);
-        
-        for (int i = 0; i < deposits; i++) {
-            fillRandomEnergyDeposit(event, 0.1, 3.0);
-        }
+        depositRandomEnergy(event, 0.5, 5.0, 15);
     }
     
-    void fillRandomEnergyDeposit(Event& event, double minEnergy, double maxEnergy) {
-        std::uniform_real_distribution<double> energyDist(minEnergy, maxEnergy);
-        std::uniform_int_distribution<int> detectorDist(0, 3);
-        
-        double energy = energyDist(rng);
-        int detector = detectorDist(rng);
-        
-        DetectorData* data = nullptr;
-        
-        switch (detector) {
-            case 0: data = event.getECALData(); break;
-            case 1: data = event.getHCALData(); break;
-            case 2: data = event.getMuonData(); break;
-            case 3: data = event.getTrackerData(); break;
-        }
-        
-        if (data) {
-            std::uniform_int_distribution<int> etaDist(0, data->getEtaBins() - 1);
-            std::uniform_int_distribution<int> phiDist(0, data->getPhiBins() - 1);
-            
-            int etaBin = etaDist(rng);
-            int phiBin = phiDist(rng);
-            
-            data->setEnergyDeposit(etaBin, phiBin, energy);
-        }
-    }
-    
-    void simulateElectron(Event& event, double minEnergy, double maxEnergy) {
-        std::uniform_real_distribution<double> energyDist(minEnergy, maxEnergy);
-        std::uniform_real_distribution<double> etaDist(-2.5, 2.5);
-        std::uniform_real_distribution<double> phiDist(-3.14, 3.14);
-        
-        double energy = energyDist(rng);
-        double eta = etaDist(rng);
-        double phi = phiDist(rng);
-        
-        // Determine bin indices for ECAL and Tracker
-        int ecalEtaBin = static_cast<int>((eta + 3.0) * event.getECALData()->getEtaBins() / 6.0);
-        int ecalPhiBin = static_cast<int>((phi + 3.14) * event.getECALData()->getPhiBins() / 6.28);
-        
-        int trackerEtaBin = static_cast<int>((eta + 3.0) * event.getTrackerData()->getEtaBins() / 6.0);
-        int trackerPhiBin = static_cast<int>((phi + 3.14) * event.getTrackerData()->getPhiBins() / 6.28);
-        
-        // Set energy deposits
-        if (ecalEtaBin >= 0 && ecalEtaBin < event.getECALData()->getEtaBins() &&
-            ecalPhiBin >= 0 && ecalPhiBin < event.getECALData()->getPhiBins()) {
-            event.getECALData()->setEnergyDeposit(ecalEtaBin, ecalPhiBin, energy);
-        }
-        
-        if (trackerEtaBin >= 0 && trackerEtaBin < event.getTrackerData()->getEtaBins() &&
-            trackerPhiBin >= 0 && trackerPhiBin < event.getTrackerData()->getPhiBins()) {
-            event.getTrackerData()->setEnergyDeposit(trackerEtaBin, trackerPhiBin, energy * 0.1);
-        }
-    }
-    
-void simulatePhoton(Event& event, double minEnergy, double maxEnergy) {
-        std::uniform_real_distribution<double> energyDist(minEnergy, maxEnergy);
-        std::uniform_real_distribution<double> etaDist(-2.5, 2.5);
-        std::uniform_real_distribution<double> phiDist(-3.14, 3.14);
-        
-        double energy = energyDist(rng);
-        double eta = etaDist(rng);
-        double phi = phiDist(rng);
-        
-        // Determine bin indices for ECAL
-        int ecalEtaBin = static_cast<int>((eta + 3.0) * event.getECALData()->getEtaBins() / 6.0);
-        int ecalPhiBin = static_cast<int>((phi + 3.14) * event.getECALData()->getPhiBins() / 6.28);
-        
-        // Set energy deposits (photons leave energy only in ECAL, not in tracker)
-        if (ecalEtaBin >= 0 && ecalEtaBin < event.getECALData()->getEtaBins() &&
-            ecalPhiBin >= 0 && ecalPhiBin < event.getECALData()->getPhiBins()) {
-            event.getECALData()->setEnergyDeposit(ecalEtaBin, ecalPhiBin, energy);
-        }
-    }
-    
-    void simulateMuon(Event& event, double minEnergy, double maxEnergy) {
-        std::uniform_real_distribution<double> energyDist(minEnergy, maxEnergy);
-        std::uniform_real_distribution<double> etaDist(-2.4, 2.4);
-        std::uniform_real_distribution<double> phiDist(-3.14, 3.14);
-        
-        double energy = energyDist(rng);
-        double eta = etaDist(rng);
-        double phi = phiDist(rng);
-        
-        // Determine bin indices for Muon system and Tracker
-        int muonEtaBin = static_cast<int>((eta + 3.0) * event.getMuonData()->getEtaBins() / 6.0);
-        int muonPhiBin = static_cast<int>((phi + 3.14) * event.getMuonData()->getPhiBins() / 6.28);
-        
-        int trackerEtaBin = static_cast<int>((eta + 3.0) * event.getTrackerData()->getEtaBins() / 6.0);
-        int trackerPhiBin = static_cast<int>((phi + 3.14) * event.getTrackerData()->getPhiBins() / 6.28);
-        
-        // Set energy deposits
-        if (muonEtaBin >= 0 && muonEtaBin < event.getMuonData()->getEtaBins() &&
-            muonPhiBin >= 0 && muonPhiBin < event.getMuonData()->getPhiBins()) {
-            event.getMuonData()->setEnergyDeposit(muonEtaBin, muonPhiBin, energy);
-        }
-        
-        if (trackerEtaBin >= 0 && trackerEtaBin < event.getTrackerData()->getEtaBins() &&
-            trackerPhiBin >= 0 && trackerPhiBin < event.getTrackerData()->getPhiBins()) {
-            event.getTrackerData()->setEnergyDeposit(trackerEtaBin, trackerPhiBin, energy * 0.1);
-        }
-    }
-    
-    void simulateJet(Event& event, double minEnergy, double maxEnergy) {
-        std::uniform_real_distribution<double> energyDist(minEnergy, maxEnergy);
-        std::uniform_real_distribution<double> etaDist(-4.7, 4.7);
-        std::uniform_real_distribution<double> phiDist(-3.14, 3.14);
-        
-        double energy = energyDist(rng);
-        double eta = etaDist(rng);
-        double phi = phiDist(rng);
-        
-        // Jets deposit energy in both ECAL and HCAL in a cone
-        simulateJetCone(event, eta, phi, energy);
-    }
-    
-    void simulateJetCone(Event& event, double eta, double phi, double energy) {
-        // Determine core bin indices for HCAL
-        int hcalEtaBin = static_cast<int>((eta + 5.0) * event.getHCALData()->getEtaBins() / 10.0);
-        int hcalPhiBin = static_cast<int>((phi + 3.14) * event.getHCALData()->getPhiBins() / 6.28);
-        
-        // Radius of the jet cone
-        int coneRadius = 2;
-        
-        // Distribute energy in a cone (70% in HCAL, 30% in ECAL)
-        double hcalFraction = 0.7;
-        double ecalFraction = 0.3;
-        
-        // Set energy deposits in a cone
-        for (int dEta = -coneRadius; dEta <= coneRadius; dEta++) {
-            for (int dPhi = -coneRadius; dPhi <= coneRadius; dPhi++) {
-                // Calculate distance from center
-                double distance = std::sqrt(dEta * dEta + dPhi * dPhi);
-                if (distance > coneRadius) continue;
-                
-                // Energy decreases with distance from center
-                double fraction = (coneRadius - distance) / coneRadius;
-                
-                // Set HCAL energy
-                int currentHcalEtaBin = hcalEtaBin + dEta;
-                int currentHcalPhiBin = hcalPhiBin + dPhi;
-                
-                // Account for phi wrapping
-                if (currentHcalPhiBin < 0) {
-                    currentHcalPhiBin += event.getHCALData()->getPhiBins();
-                } else if (currentHcalPhiBin >= event.getHCALData()->getPhiBins()) {
-                    currentHcalPhiBin -= event.getHCALData()->getPhiBins();
-                }
-                
-                if (currentHcalEtaBin >= 0 && currentHcalEtaBin < event.getHCALData()->getEtaBins() &&
-                    currentHcalPhiBin >= 0 && currentHcalPhiBin < event.getHCALData()->getPhiBins()) {
-                    double hcalEnergy = energy * hcalFraction * fraction;
-                    event.getHCALData()->setEnergyDeposit(currentHcalEtaBin, currentHcalPhiBin, hcalEnergy);
-                }
-                
-                // Set ECAL energy (scaled by ECAL/HCAL bin ratio)
-                int ecalEtaBin = static_cast<int>(currentHcalEtaBin * 
-                                                event.getECALData()->getEtaBins() / 
-                                                event.getHCALData()->getEtaBins());
-                int ecalPhiBin = static_cast<int>(currentHcalPhiBin * 
-                                                event.getECALData()->getPhiBins() / 
-                                                event.getHCALData()->getPhiBins());
-                
-                if (ecalEtaBin >= 0 && ecalEtaBin < event.getECALData()->getEtaBins() &&
-                    ecalPhiBin >= 0 && ecalPhiBin < event.getECALData()->getPhiBins()) {
-                    double ecalEnergy = energy * ecalFraction * fraction;
-                    event.getECALData()->setEnergyDeposit(ecalEtaBin, ecalPhiBin, ecalEnergy);
-                }
+    void depositRandomEnergy(CollisionEvent& event, double minE, double maxE, int n = 1) {
+        std::uniform_real_distribution<double> eDist(minE, maxE);
+        for (int i = 0; i < n; i++) {
+            int det = std::uniform_int_distribution<int>(0, 3)(rng);
+            DetectorLayer* layer = nullptr;
+            switch (det) {
+                case 0: layer = event.getECAL(); break;
+                case 1: layer = event.getHCAL(); break;
+                case 2: layer = event.getMuon(); break;
+                case 3: layer = event.getTracker(); break;
             }
+            int eta = std::uniform_int_distribution<int>(0, layer->getEtaBins() - 1)(rng);
+            int phi = std::uniform_int_distribution<int>(0, layer->getPhiBins() - 1)(rng);
+            layer->depositEnergy(eta, phi, eDist(rng));
         }
     }
     
 public:
-    EventGenerator() : rng(std::random_device{}()), nextEventId(0) {}
+    EventGenerator() : rng(std::random_device{}()), eventCounter(0) {}
     
-    std::shared_ptr<Event> generateEvent() {
-        auto event = std::make_shared<Event>(nextEventId++);
+    std::shared_ptr<CollisionEvent> generate() {
+        auto event = std::make_shared<CollisionEvent>(eventCounter++);
+        std::discrete_distribution<int> processDist({60, 20, 10, 10});  // QCD, SingleLep, DiLep, MultiJet
+        ProcessType process = static_cast<ProcessType>(processDist(rng));
         
-        // Choose physics process to simulate
-        std::discrete_distribution<int> processDist({70, 10, 10, 9, 1});
-        PhysicsProcess process = static_cast<PhysicsProcess>(processDist(rng));
-        
-        // Simulate the chosen physics process
-        simulatePhysicsProcess(*event, process);
-        
+        switch (process) {
+            case QCD: generateQCD(*event); break;
+            case SINGLE_LEP: generateSingleLepton(*event); break;
+            case DILEP: generateDilepton(*event); break;
+            case MULTIJET: generateMultijet(*event); break;
+        }
         return event;
     }
 };
 
-} // namespace CMSL1Trigger
+} // namespace CMSL1Sim
 
-// Main function to run the simulation
 int main() {
-    using namespace CMSL1Trigger;
+    using namespace CMSL1Sim;
     
-    // Create event generator and trigger system
     EventGenerator generator;
-    TriggerSystem triggerSystem;
+    L1TriggerSystem trigger;
     
-    // Start trigger system
-    triggerSystem.start();
+    trigger.start();
     
-    // Number of events to simulate
-    const int numEvents = 1000;
-    
-    // Generate and process events
-    for (int i = 0; i < numEvents; i++) {
-        auto event = generator.generateEvent();
-        triggerSystem.queueEvent(event);
+    const int nEvents = 500;
+    for (int i = 0; i < nEvents; i++) {
+        auto event = generator.generate();
+        trigger.queueEvent(event);
         
-        // Show progress
-        if (i % 100 == 0) {
-            std::cout << "Generated " << i << " events, queue size: " 
-                      << triggerSystem.getQueueSize() << std::endl;
+        if (i % 50 == 0) {
+            std::cout << "Generated " << i << " events\n";
         }
-        
-        // Small delay to simulate realistic data rate
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));  // ~40 kHz LHC rate
     }
     
-    // Wait for all events to be processed
-    while (triggerSystem.getQueueSize() > 0) {
-        std::cout << "Waiting for " << triggerSystem.getQueueSize() 
-                  << " events to be processed..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+    while (trigger.getProcessedEvents() < nEvents) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::cout << "Processed: " << trigger.getProcessedEvents() << "/" << nEvents << std::endl;
     }
     
-    // Allow final events to be processed
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    trigger.stop();
     
-    // Stop trigger system
-    triggerSystem.stop();
-    
-    // Print statistics
-    std::cout << "Simulation complete!" << std::endl;
-    std::cout << "Events processed: " << triggerSystem.getEventsProcessed() << std::endl;
-    std::cout << "Events passed: " << triggerSystem.getEventsPassed() << std::endl;
-    std::cout << "Acceptance rate: " << (triggerSystem.getAcceptanceRate() * 100.0) 
-              << "%" << std::endl;
+    std::cout << "\nSimulation Summary:\n";
+    std::cout << "Events Processed: " << trigger.getProcessedEvents() << std::endl;
+    std::cout << "Events Passed: " << trigger.getPassedEvents() << std::endl;
+    std::cout << "Trigger Efficiency: " << (trigger.getEfficiency() * 100) << "%\n";
     
     return 0;
 }
-
