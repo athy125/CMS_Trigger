@@ -1,465 +1,366 @@
-#!/usr/bin/env python3
-# Visualization tools for the CMS L1 Trigger simulation
-
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm
-import pandas as pd
-from datetime import datetime
 import os
-import subprocess
 import re
-import time
-import argparse
-from collections import defaultdict
 import json
+import subprocess
 import threading
 import queue
+import time
+from collections import defaultdict
+import logging
+import argparse
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.widgets import Slider
+from mpl_toolkits.mplot3d import Axes3D
 
 class TriggerVisualizer:
-    """Class to visualize trigger data from the CMS L1 Trigger simulation"""
-    
-    def __init__(self, data_dir="./data", log_file="trigger_log.txt"):
-        """Initialize the visualizer with data directory and logging"""
+    def __init__(self, data_dir="data"):
         self.data_dir = data_dir
-        if not os.path.exists(data_dir):
-            os.makedirs(data_dir)
-        self.log_file = os.path.join(data_dir, log_file)
+        os.makedirs(data_dir, exist_ok=True)
+        
         self.events = []
-        self.trigger_stats = defaultdict(int)
         self.rate_data = []
-        self.live_queue = queue.Queue()  # For real-time data
-        self.live_processing = False
-        self.event_details = {}  # Store detailed event data
-        self.lock = threading.Lock()  # Thread safety
+        self.trigger_stats = defaultdict(int)
+        self.live_queue = queue.Queue()
+        self.lock = threading.Lock()
         
-    def log_message(self, message):
-        """Log messages to file with timestamp"""
-        with open(self.log_file, 'a') as f:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            f.write(f"[{timestamp}] {message}\n")
-    
+        logging.basicConfig(filename=os.path.join(data_dir, 'trigger_log.txt'),
+                          level=logging.INFO, format='%(asctime)s - %(message)s')
+        self.logger = logging.getLogger()
+
     def parse_simulation_output(self, output_file):
-        """Parse the output of the CMS L1 Trigger simulation from a file"""
-        event_pattern = re.compile(r"Event (\d+) (PASSED|REJECTED)")
+        self.logger.info(f"Parsing simulation output from {output_file}")
+        event_pattern = re.compile(r"Event (\d+) (PASSED|REJECTED) \| Candidates: (\d+)")
         trigger_pattern = re.compile(r"  Passed trigger: (\w+)")
         
-        self.log_message(f"Parsing simulation output from {output_file}")
         with open(output_file, 'r') as f:
-            current_event = None
-            for line in f:
-                event_match = event_pattern.search(line)
-                if event_match:
-                    event_id = int(event_match.group(1))
-                    passed = event_match.group(2) == "PASSED"
-                    current_event = {
-                        'id': event_id,
-                        'passed': passed,
-                        'triggers': [],
-                        'timestamp': time.time()
-                    }
-                    with self.lock:
-                        self.events.append(current_event)
-                        if passed:
-                            self.trigger_stats['total_passed'] += 1
-                
-                trigger_match = trigger_pattern.search(line)
-                if trigger_match and current_event and current_event['passed']:
-                    trigger_name = trigger_match.group(1)
-                    current_event['triggers'].append(trigger_name)
-                    with self.lock:
-                        self.trigger_stats[trigger_name] += 1
+            lines = f.readlines()
         
-        self.update_rates()
-        self.log_message(f"Parsed {len(self.events)} events, {self.trigger_stats['total_passed']} passed")
-        print(f"Parsed {len(self.events)} events")
-        print(f"Total passed: {self.trigger_stats['total_passed']}")
-    
-    def parse_live_output(self, simulation_process):
-        """Parse output from a running simulation process in real-time"""
-        event_pattern = re.compile(r"Event (\d+) (PASSED|REJECTED)")
-        trigger_pattern = re.compile(r"  Passed trigger: (\w+)")
-        
-        self.live_processing = True
         current_event = None
-        self.log_message("Starting live output parsing")
+        for line in lines:
+            event_match = event_pattern.search(line)
+            if event_match:
+                event_id, status, cand_count = event_match.groups()
+                current_event = {
+                    'id': int(event_id),
+                    'passed': status == 'PASSED',
+                    'candidates': int(cand_count),
+                    'triggers': [],
+                    'timestamp': time.time()
+                }
+                self.events.append(current_event)
+                self.trigger_stats['total_events'] += 1
+                if status == 'PASSED':
+                    self.trigger_stats['total_passed'] += 1
+            elif current_event and trigger_pattern.search(line):
+                trigger_name = trigger_pattern.search(line).group(1)
+                current_event['triggers'].append(trigger_name)
+                self.trigger_stats[trigger_name] += 1
+
+    def run_simulation(self, executable, num_events):
+        self.logger.info(f"Running simulation with {executable} for {num_events} events")
+        cmd = [executable]
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         
-        while self.live_processing:
-            try:
-                line = simulation_process.stdout.readline().decode('utf-8')
-                if not line and simulation_process.poll() is not None:
-                    break
-                
-                if line:
-                    print(line, end='')
+        def stream_output():
+            event_pattern = re.compile(r"Event (\d+) (PASSED|REJECTED) \| Candidates: (\d+)")
+            trigger_pattern = re.compile(r"  Passed trigger: (\w+)")
+            current_event = None
+            
+            for line in iter(process.stdout.readline, ''):
+                with self.lock:
                     event_match = event_pattern.search(line)
                     if event_match:
-                        event_id = int(event_match.group(1))
-                        passed = event_match.group(2) == "PASSED"
+                        event_id, status, cand_count = event_match.groups()
                         current_event = {
-                            'id': event_id,
-                            'passed': passed,
+                            'id': int(event_id),
+                            'passed': status == 'PASSED',
+                            'candidates': int(cand_count),
                             'triggers': [],
                             'timestamp': time.time()
                         }
-                        with self.lock:
-                            self.events.append(current_event)
-                            if passed:
-                                self.trigger_stats['total_passed'] += 1
-                        self.live_queue.put(current_event)
-                    
-                    trigger_match = trigger_pattern.search(line)
-                    if trigger_match and current_event and current_event['passed']:
-                        trigger_name = trigger_match.group(1)
+                        self.events.append(current_event)
+                        self.live_queue.put(current_event.copy())
+                        self.trigger_stats['total_events'] += 1
+                        if status == 'PASSED':
+                            self.trigger_stats['total_passed'] += 1
+                    elif current_event and trigger_pattern.search(line):
+                        trigger_name = trigger_pattern.search(line).group(1)
                         current_event['triggers'].append(trigger_name)
-                        with self.lock:
-                            self.trigger_stats[trigger_name] += 1
-            except Exception as e:
-                self.log_message(f"Error in live parsing: {str(e)}")
-                break
+                        self.trigger_stats[trigger_name] += 1
+                print(line, end='')
         
-        self.live_processing = False
-        self.update_rates()
-        self.log_message("Live output parsing completed")
-    
-    def update_rates(self, window_size=100):
-        """Update acceptance rate data"""
-        with self.lock:
-            self.rate_data.clear()
-            for i in range(0, len(self.events), window_size):
-                window = self.events[i:i+window_size]
-                if window:
-                    passes = sum(1 for e in window if e['passed'])
-                    rate = passes / len(window)
-                    self.rate_data.append({
-                        'event_block': i // window_size,
-                        'start_event': i,
-                        'end_event': min(i+window_size, len(self.events)),
-                        'rate': rate,
-                        'timestamp': window[-1]['timestamp']
-                    })
-    
-    def run_simulation(self, executable_path, num_events=1000):
-        """Run the CMS L1 Trigger simulation and capture output"""
-        cmd = [executable_path, str(num_events)]
-        
-        self.log_message(f"Running simulation with command: {' '.join(cmd)}")
-        print(f"Running simulation with {num_events} events...")
-        process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-        )
-        
-        # Start live parsing in a separate thread
-        parse_thread = threading.Thread(target=self.parse_live_output, args=(process,))
-        parse_thread.start()
-        
-        # Optionally start live visualization
-        vis_thread = threading.Thread(target=self.live_rate_plot)
-        vis_thread.start()
-        
-        return_code = process.wait()
-        parse_thread.join()
-        vis_thread.join()
-        
-        if return_code != 0:
-            self.log_message(f"Simulation failed with code {return_code}")
-            print(f"Simulation exited with code {return_code}")
-        else:
-            self.log_message("Simulation completed successfully")
-    
-    def plot_trigger_rates(self, save=False):
-        """Plot the trigger acceptance rates"""
-        if not self.events:
-            print("No events to plot. Run simulation first.")
-            return
-            
-        with self.lock:
-            # Plot overall acceptance rate over time
-            fig, ax = plt.subplots(figsize=(10, 6))
-            df = pd.DataFrame(self.rate_data)
-            ax.plot(df['event_block'], df['rate'], 'o-', label='Acceptance Rate')
-            overall_rate = self.trigger_stats['total_passed'] / len(self.events)
-            ax.axhline(y=overall_rate, color='r', linestyle='--', label=f'Overall Rate ({overall_rate:.2%})')
-            ax.set_xlabel('Event Block (100 events each)')
-            ax.set_ylabel('Acceptance Rate')
-            ax.set_title('CMS L1 Trigger Acceptance Rate')
-            ax.grid(True, alpha=0.3)
-            ax.legend()
-            
-            if save:
-                filename = os.path.join(self.data_dir, f'trigger_rate_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
-                plt.savefig(filename, dpi=300)
-                self.log_message(f"Saved trigger rate plot to {filename}")
-            plt.show()
-            
-            # Plot trigger type distribution
-            plt.figure(figsize=(12, 6))
-            trigger_counts = {k: v for k, v in self.trigger_stats.items() if k != 'total_passed'}
-            if trigger_counts:
-                names = list(trigger_counts.keys())
-                values = list(trigger_counts.values())
-                bars = plt.bar(names, values)
-                plt.xlabel('Trigger Type')
-                plt.ylabel('Number of Events')
-                plt.title('CMS L1 Trigger Type Distribution')
-                plt.xticks(rotation=45)
-                
-                # Add percentage labels
-                total_passed = self.trigger_stats['total_passed']
-                for bar in bars:
-                    height = bar.get_height()
-                    plt.text(bar.get_x() + bar.get_width()/2., height,
-                            f'{height/total_passed:.1%}', ha='center', va='bottom')
-                
-                if save:
-                    filename = os.path.join(self.data_dir, f'trigger_distribution_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
-                    plt.savefig(filename, dpi=300)
-                    self.log_message(f"Saved trigger distribution plot to {filename}")
-                plt.tight_layout()
-                plt.show()
-    
+        threading.Thread(target=stream_output, daemon=True).start()
+        threading.Thread(target=self.live_particle_animation, daemon=True).start()
+        process.wait()
+
+    def generate_test_data(self, num_events):
+        self.logger.info(f"Generating {num_events} test events")
+        particle_types = ['MUON', 'JET', 'ELECTRON', 'PHOTON']
+        for i in range(num_events):
+            event = {
+                'id': i,
+                'passed': np.random.choice([True, False]),
+                'candidates': np.random.randint(0, 5),
+                'triggers': [],
+                'timestamp': time.time()
+            }
+            if event['passed']:
+                event['triggers'] = [np.random.choice(['SingleMuon', 'DiJet', 'ElectronPhoton'])]
+                self.trigger_stats[event['triggers'][0]] += 1
+            self.events.append(event)
+            self.save_event_data(event)
+
+    def save_event_data(self, event):
+        filename = os.path.join(self.data_dir, f"event_{event['id']}.json")
+        with open(filename, 'w') as f:
+            json.dump(event, f)
+
     def live_rate_plot(self):
-        """Live plotting of trigger acceptance rate"""
         fig, ax = plt.subplots(figsize=(10, 6))
-        plt.title('Live CMS L1 Trigger Acceptance Rate')
-        plt.xlabel('Event Block (100 events each)')
-        plt.ylabel('Acceptance Rate')
-        plt.grid(True, alpha=0.3)
-        
-        line, = ax.plot([], [], 'o-', label='Acceptance Rate')
-        overall_line = ax.axhline(y=0, color='r', linestyle='--', label='Overall Rate')
+        ax.set_title('Live Trigger Acceptance Rate')
+        ax.set_xlabel('Event Block (x10)')
+        ax.set_ylabel('Acceptance Rate')
+        line, = ax.plot([], [], 'o-', label='Rate')
         ax.legend()
         
         def update(frame):
             with self.lock:
-                if not self.rate_data:
-                    return line, overall_line
+                if not self.rate_data or self.live_queue.empty():
+                    return line,
                 df = pd.DataFrame(self.rate_data)
                 line.set_data(df['event_block'], df['rate'])
-                overall_rate = self.trigger_stats['total_passed'] / len(self.events) if self.events else 0
-                overall_line.set_ydata([overall_rate])
                 ax.relim()
                 ax.autoscale_view()
-            return line, overall_line
+            return line,
         
-        ani = animation.FuncAnimation(fig, update, interval=1000, blit=True, repeat=False)
+        ani = animation.FuncAnimation(fig, update, interval=1000, blit=True)
         plt.show()
-    
-    def plot_detector_event(self, event_data, save=False):
-        """Plot detector data for a specific event with interactive controls"""
-        fig = plt.figure(figsize=(15, 12))
-        fig.suptitle(f"Event {event_data['id']} - {'Passed' if event_data['passed'] else 'Rejected'}", fontsize=16)
+
+    def live_particle_animation(self):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        ax1.set_title('Live Acceptance Rate')
+        ax1.set_xlabel('Event Block (x10)')
+        ax1.set_ylabel('Acceptance Rate')
+        ax2.set_title('Particle Trajectories')
+        ax2.set_xlim(-3, 3)
+        ax2.set_ylim(-np.pi, np.pi)
+        ax2.set_xlabel('η')
+        ax2.set_ylabel('φ')
         
-        # Create subplots
-        axs = fig.subplot_mosaic([['ECAL', 'HCAL'], ['MUON', 'TRACKER']], layout='constrained')
+        rate_line, = ax1.plot([], [], 'o-', label='Rate')
+        ax1.legend()
+        scat = ax2.scatter([], [], c='red', s=50)
         
-        # Plot each detector
-        detectors = {
-            'ECAL': {'data': np.array(event_data['detectors']['ECAL']), 'cmap': 'viridis', 'vmax': 100},
-            'HCAL': {'data': np.array(event_data['detectors']['HCAL']), 'cmap': 'plasma', 'vmax': 100},
-            'MUON': {'data': np.array(event_data['detectors']['MUON']), 'cmap': 'cool', 'vmax': 100},
-            'TRACKER': {'data': np.array(event_data['detectors']['TRACKER']), 'cmap': 'cividis', 'vmax': 10}
-        }
+        def update(frame):
+            with self.lock:
+                if not self.rate_data or self.live_queue.empty():
+                    return rate_line, scat
+                df = pd.DataFrame(self.rate_data)
+                rate_line.set_data(df['event_block'], df['rate'])
+                ax1.relim()
+                ax1.autoscale_view()
+                
+                event_json = os.path.join(self.data_dir, f"event_{self.events[-1]['id']}.json")
+                if os.path.exists(event_json):
+                    with open(event_json, 'r') as f:
+                        event = json.load(f)
+                    eta = [cand['eta'] for cand in event['candidates']]
+                    phi = [cand['phi'] for cand in event['candidates']]
+                    scat.set_offsets(np.c_[eta, phi])
+            return rate_line, scat
         
-        images = {}
-        for det_name, det_info in detectors.items():
-            ax = axs[det_name]
-            im = ax.imshow(det_info['data'], cmap=det_info['cmap'], norm=LogNorm(vmin=0.1, vmax=det_info['vmax']))
-            ax.set_title(f'{det_name} Energy Deposits')
-            ax.set_xlabel('φ bin')
-            ax.set_ylabel('η bin')
-            fig.colorbar(im, ax=ax, label='Energy (GeV)')
-            images[det_name] = im
+        ani = animation.FuncAnimation(fig, update, interval=100, blit=True)
+        plt.show()
+
+    def plot_trigger_rates(self, save=False):
+        df = pd.DataFrame(self.rate_data)
+        plt.figure(figsize=(10, 6))
+        plt.plot(df['event_block'], df['rate'], 'o-')
+        plt.xlabel('Event Block (x10)')
+        plt.ylabel('Acceptance Rate')
+        plt.title('Trigger Acceptance Rate Over Time')
+        if save:
+            plt.savefig(os.path.join(self.data_dir, f"trigger_rate_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"))
+        plt.show()
+
+    def plot_trigger_distribution(self, save=False):
+        triggers = [t for e in self.events for t in e['triggers']]
+        plt.figure(figsize=(10, 6))
+        plt.hist(triggers, bins=len(set(triggers)), edgecolor='black')
+        plt.xlabel('Trigger Type')
+        plt.ylabel('Count')
+        plt.title('Trigger Distribution')
+        if save:
+            plt.savefig(os.path.join(self.data_dir, f"trigger_distribution_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"))
+        plt.show()
+
+    def plot_3d_detector_event(self, event_id, save=False):
+        filename = os.path.join(self.data_dir, f"event_{event_id}.json")
+        if not os.path.exists(filename):
+            self.logger.error(f"Event file {filename} not found")
+            return
         
-        # Add trigger info
-        trigger_text = "Triggers: " + ", ".join(event_data['triggers']) if event_data['passed'] else "No triggers"
-        plt.figtext(0.5, 0.01, trigger_text, ha='center', fontsize=12, 
-                    bbox={'facecolor': 'lightgray', 'alpha': 0.5, 'pad': 5})
+        with open(filename, 'r') as f:
+            event_data = json.load(f)
         
-        # Add slider for threshold adjustment
-        ax_slider = plt.axes([0.25, 0.95, 0.5, 0.03], facecolor='lightgoldenrodyellow')
-        threshold_slider = Slider(ax_slider, 'Energy Threshold', 0.1, 100.0, valinit=0.1, valstep=0.1)
+        fig = plt.figure(figsize=(12, 10))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        eta_bins = np.linspace(-2.5, 2.5, len(event_data['detectors']['ECAL']))
+        phi_bins = np.linspace(-np.pi, np.pi, len(event_data['detectors']['ECAL'][0]))
+        phi, eta = np.meshgrid(phi_bins, eta_bins)
+        
+        ecal = np.array(event_data['detectors']['ECAL'])
+        x = np.cos(phi) * 1
+        y = np.sin(phi) * 1
+        z = eta
+        ax.plot_surface(x, y, z, facecolors=plt.cm.viridis(ecal / (ecal.max() + 1e-6)), alpha=0.7)
+        
+        ax.set_xlabel('X (cos φ)')
+        ax.set_ylabel('Y (sin φ)')
+        ax.set_zlabel('η')
+        ax.set_title(f"3D Event Display - Event {event_id}")
+        if save:
+            plt.savefig(os.path.join(self.data_dir, f"3d_event_{event_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"))
+        plt.show()
+
+    def trigger_tuning_dashboard(self):
+        fig, ax = plt.subplots(figsize=(10, 8))
+        plt.subplots_adjust(bottom=0.25)
+        
+        rates = {'SingleMuon': [], 'DiJet': [], 'ElectronPhoton': []}
+        lines = {name: ax.plot([], [], label=name)[0] for name in rates}
+        ax.set_xlabel('Event Block')
+        ax.set_ylabel('Trigger Rate')
+        ax.legend()
+        
+        ax_muon = plt.axes([0.25, 0.1, 0.65, 0.03])
+        ax_dijet = plt.axes([0.25, 0.05, 0.65, 0.03])
+        ax_elec = plt.axes([0.25, 0.0, 0.65, 0.03])
+        s_muon = Slider(ax_muon, 'Muon pT', 10, 50, valinit=25)
+        s_dijet = Slider(ax_dijet, 'Jet pT', 20, 100, valinit=50)
+        s_elec = Slider(ax_elec, 'Elec/Phot pT', 10, 60, valinit=30)
         
         def update(val):
-            threshold = threshold_slider.val
-            for det_name, im in images.items():
-                data = detectors[det_name]['data']
-                masked_data = np.where(data > threshold, data, 0.1)
-                im.set_data(masked_data)
-            fig.canvas.draw_idle()
+            with self.lock:
+                for i, event in enumerate(self.events):
+                    block = i // 10
+                    muon_pass = any(c['pt'] > s_muon.val and c['type'] == 2 for c in event.get('candidates', []))
+                    jet_pass = sum(1 for c in event.get('candidates', []) if c['pt'] > s_dijet.val and c['type'] == 3) >= 2
+                    elec_pass = any(c['pt'] > s_elec.val and c['type'] in [0, 1] for c in event.get('candidates', []))
+                    
+                    if block >= len(rates['SingleMuon']):
+                        rates['SingleMuon'].append(0)
+                        rates['DiJet'].append(0)
+                        rates['ElectronPhoton'].append(0)
+                    
+                    if muon_pass: rates['SingleMuon'][block] += 1
+                    if jet_pass: rates['DiJet'][block] += 1
+                    if elec_pass: rates['ElectronPhoton'][block] += 1
+                
+                for name, line in lines.items():
+                    line.set_data(range(len(rates[name])), rates[name])
+                ax.relim()
+                ax.autoscale_view()
         
-        threshold_slider.on_changed(update)
-        
-        if save:
-            filename = os.path.join(self.data_dir, f'event_{event_data["id"]}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png')
-            plt.savefig(filename, dpi=300)
-            self.log_message(f"Saved event plot to {filename}")
+        s_muon.on_changed(update)
+        s_dijet.on_changed(update)
+        s_elec.on_changed(update)
+        update(None)
         plt.show()
-    
-    def load_event_data(self, event_id):
-        """Load detailed data for a specific event from file"""
-        event_file = os.path.join(self.data_dir, f'event_{event_id}.json')
-        if os.path.exists(event_file):
-            with open(event_file, 'r') as f:
-                self.log_message(f"Loaded event data for event {event_id}")
-                return json.load(f)
-        else:
-            self.log_message(f"No detailed data found for event {event_id}")
-            print(f"No detailed data found for event {event_id}")
-            return None
-    
-    def save_event_data(self, event_data):
-        """Save detailed data for an event to file"""
-        event_file = os.path.join(self.data_dir, f'event_{event_data["id"]}.json')
-        with open(event_file, 'w') as f:
-            json.dump(event_data, f, indent=2)
-        self.log_message(f"Saved event data for event {event_data['id']}")
-    
-    def export_stats(self, filename=None):
-        """Export trigger statistics to a file with detailed analysis"""
-        if not filename:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = os.path.join(self.data_dir, f'trigger_stats_{timestamp}.csv')
-        
-        with self.lock:
-            stats_df = pd.DataFrame([
-                {'trigger': trigger, 'count': count} 
-                for trigger, count in self.trigger_stats.items()
-                if trigger != 'total_passed'
-            ])
-            
-            if not stats_df.empty:
-                total_events = len(self.events)
-                passed_events = self.trigger_stats['total_passed']
-                stats_df['percentage'] = stats_df['count'] / passed_events * 100
-                stats_df.to_csv(filename, index=False)
-                self.log_message(f"Exported statistics to {filename}")
-                
-                # Detailed console output
-                print("\nTrigger Statistics Summary:")
-                print(f"Total events: {total_events}")
-                print(f"Passed events: {passed_events} ({passed_events/total_events*100:.2f}%)")
-                print("\nTrigger Type Distribution:")
-                for _, row in stats_df.iterrows():
-                    print(f"  {row['trigger']}: {row['count']} ({row['percentage']:.2f}%)")
-                
-                # Rate statistics
-                rate_df = pd.DataFrame(self.rate_data)
-                if not rate_df.empty:
-                    print("\nRate Statistics:")
-                    print(f"Mean acceptance rate: {rate_df['rate'].mean():.2%}")
-                    print(f"Rate std dev: {rate_df['rate'].std():.2%}")
-                    print(f"Max rate: {rate_df['rate'].max():.2%} (Block {rate_df['rate'].idxmax()})")
-            else:
-                print("No statistics to export")
-                self.log_message("No statistics available for export")
 
-def fake_detector_data(num_events=10):
-    """Generate fake detector data for testing visualization"""
-    np.random.seed(42)
-    events = []
-    
-    for i in range(num_events):
-        passed = np.random.random() > 0.7
-        ecal = np.random.exponential(1.0, size=(72, 72)) * (np.random.random(size=(72, 72)) > 0.95)
-        hcal = np.random.exponential(2.0, size=(72, 72)) * (np.random.random(size=(72, 72)) > 0.97)
-        muon = np.random.exponential(3.0, size=(36, 36)) * (np.random.random(size=(36, 36)) > 0.98)
-        tracker = np.random.exponential(0.5, size=(100, 180)) * (np.random.random(size=(100, 180)) > 0.99)
+    def plot_event_timeline(self, save=False):
+        fig, ax = plt.subplots(figsize=(12, 6))
+        times = [e['timestamp'] for e in self.events]
+        process_colors = {0: 'b', 1: 'g', 2: 'r', 3: 'y'}  # QCD, SINGLE_LEP, DILEP, MULTIJET
+        colors = [process_colors.get(e.get('process', 0), 'k') for e in self.events]
         
-        # Add realistic signatures
-        if np.random.random() > 0.5:  # Lepton or photon
-            eta_pos, phi_pos = np.random.randint(10, 60, 2)
-            energy = np.random.uniform(20, 80)
-            ecal[eta_pos, phi_pos] = energy
-            for de in range(-2, 3):
-                for dp in range(-2, 3):
-                    if 0 <= eta_pos + de < 72 and 0 <= phi_pos + dp < 72:
-                        dist = np.sqrt(de**2 + dp**2)
-                        if dist > 0:
-                            ecal[eta_pos + de, phi_pos + dp] = energy * np.exp(-dist) * 0.3
-            if np.random.random() > 0.5:  # Electron
-                tracker[int(eta_pos * 100/72), int(phi_pos * 180/72)] = energy * 0.1
+        scat = ax.scatter(range(len(times)), times, c=colors, picker=True)
+        ax.set_xlabel('Event Number')
+        ax.set_ylabel('Timestamp (s)')
+        ax.set_title('Event Timeline by Physics Process')
         
-        if np.random.random() > 0.6:  # Jet
-            eta_pos, phi_pos = np.random.randint(15, 55, 2)
-            energy = np.random.uniform(40, 120)
-            for de in range(-3, 4):
-                for dp in range(-3, 4):
-                    if 0 <= eta_pos + de < 72 and 0 <= phi_pos + dp < 72:
-                        dist = np.sqrt(de**2 + dp**2)
-                        if dist <= 3:
-                            hcal[eta_pos + de, phi_pos + dp] = energy * np.exp(-dist/2) * 0.7
-                            ecal[eta_pos + de, phi_pos + dp] += energy * np.exp(-dist/2) * 0.3
+        def on_pick(event):
+            ind = event.ind[0]
+            evt = self.events[ind]
+            process_names = {0: 'QCD', 1: 'Single Lepton', 2: 'Dilepton', 3: 'Multijet'}
+            tooltip = f"Event {evt['id']}\nProcess: {process_names.get(evt.get('process', 0), 'Unknown')}\nTriggers: {', '.join(evt['triggers'])}"
+            plt.gcf().text(0.5, 0.9, tooltip, ha='center', va='top', bbox=dict(facecolor='white', alpha=0.8))
+            plt.draw()
         
-        event = {
-            'id': i,
-            'passed': passed,
-            'triggers': ['SingleMuon', 'Jet', 'SingleElectron'][np.random.randint(0, 3)] if passed else [],
-            'detectors': {
-                'ECAL': ecal.tolist(),
-                'HCAL': hcal.tolist(),
-                'MUON': muon.tolist(),
-                'TRACKER': tracker.tolist()
-            }
-        }
-        events.append(event)
-    return events
+        fig.canvas.mpl_connect('pick_event', on_pick)
+        if save:
+            plt.savefig(os.path.join(self.data_dir, f"timeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"))
+        plt.show()
+
+    def export_to_ar(self, event_id, filename="event.glb"):
+        filename_json = os.path.join(self.data_dir, f"event_{event_id}.json")
+        if not os.path.exists(filename_json):
+            self.logger.error(f"Event file {filename_json} not found")
+            return
+        
+        with open(filename_json, 'r') as f:
+            event_data = json.load(f)
+        
+        # Simplified export to JSON for AR (convert to GLTF manually later)
+        ar_file = os.path.join(self.data_dir, f"event_{event_id}_ar.json")
+        with open(ar_file, 'w') as f:
+            json.dump(event_data, f)
+        self.logger.info(f"Exported AR data to {ar_file}")
+
+    def save_statistics(self):
+        stats_file = os.path.join(self.data_dir, f"trigger_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        df = pd.DataFrame.from_dict(self.trigger_stats, orient='index', columns=['count'])
+        df.to_csv(stats_file)
+        self.logger.info(f"Statistics saved to {stats_file}")
+        
+        print("\nTrigger Statistics:")
+        for trigger, count in self.trigger_stats.items():
+            print(f"{trigger}: {count}")
+        if self.trigger_stats['total_events'] > 0:
+            efficiency = self.trigger_stats['total_passed'] / self.trigger_stats['total_events']
+            print(f"Overall Efficiency: {efficiency:.2%}")
 
 def main():
-    parser = argparse.ArgumentParser(description='CMS L1 Trigger Visualization Tool')
-    parser.add_argument('--simulate', action='store_true', help='Run the C++ simulation')
-    parser.add_argument('--executable', type=str, default='./cms_l1_trigger_sim',
-                        help='Path to the compiled C++ executable')
-    parser.add_argument('--events', type=int, default=1000,
-                        help='Number of events to simulate')
-    parser.add_argument('--parse', type=str, help='Parse output from a file')
-    parser.add_argument('--test', action='store_true', help='Run with test data')
-    parser.add_argument('--view-event', type=int, help='View a specific event')
-    parser.add_argument('--data-dir', type=str, default='./data',
-                        help='Directory for data files')
-    
+    parser = argparse.ArgumentParser(description="CMS L1 Trigger Visualizer")
+    parser.add_argument('--simulate', action='store_true', help="Run live simulation")
+    parser.add_argument('--executable', type=str, help="Path to simulation executable")
+    parser.add_argument('--events', type=int, default=500, help="Number of events to simulate")
+    parser.add_argument('--parse', type=str, help="Parse simulation output file")
+    parser.add_argument('--test', action='store_true', help="Generate test data")
+    parser.add_argument('--view-event', type=int, help="View specific event in 3D")
+    parser.add_argument('--tune', action='store_true', help="Open trigger tuning dashboard")
+    parser.add_argument('--timeline', action='store_true', help="Show event timeline")
+    parser.add_argument('--ar-export', type=int, help="Export event for AR")
     args = parser.parse_args()
-    visualizer = TriggerVisualizer(data_dir=args.data_dir)
     
-    if args.simulate:
-        if os.path.exists(args.executable):
-            visualizer.run_simulation(args.executable, args.events)
-            visualizer.plot_trigger_rates(save=True)
-            visualizer.export_stats()
-        else:
-            print(f"Error: Executable not found at {args.executable}")
-            return
+    vis = TriggerVisualizer()
     
-    if args.parse:
-        if os.path.exists(args.parse):
-            visualizer.parse_simulation_output(args.parse)
-            visualizer.plot_trigger_rates(save=True)
-            visualizer.export_stats()
-        else:
-            print(f"Error: Output file not found at {args.parse}")
-            return
-    
-    if args.test:
-        print("Generating test data...")
-        test_events = fake_detector_data(args.events if args.events else 10)
-        for event in test_events:
-            visualizer.events.append({'id': event['id'], 'passed': event['passed'], 
-                                    'triggers': event['triggers'], 'timestamp': time.time()})
-            if event['passed']:
-                visualizer.trigger_stats['total_passed'] += 1
-                for trigger in event['triggers']:
-                    visualizer.trigger_stats[trigger] += 1
-            visualizer.save_event_data(event)
-        visualizer.update_rates(window_size=5)
-        visualizer.plot_trigger_rates(save=True)
-        visualizer.export_stats()
+    if args.simulate and args.executable:
+        vis.run_simulation(args.executable, args.events)
+    elif args.parse:
+        vis.parse_simulation_output(args.parse)
+    elif args.test:
+        vis.generate_test_data(args.events)
     
     if args.view_event is not None:
-        event_data = visualizer.load_event_data(args.view_event)
-        if event_data:
-            visualizer.plot_detector_event(event_data, save=True)
+        vis.plot_3d_detector_event(args.view_event, save=True)
+    elif args.tune:
+        vis.trigger_tuning_dashboard()
+    elif args.timeline:
+        vis.plot_event_timeline(save=True)
+    elif args.ar_export is not None:
+        vis.export_to_ar(args.ar_export)
+    else:
+        vis.plot_trigger_rates(save=True)
+        vis.plot_trigger_distribution(save=True)
+    
+    vis.save_statistics()
 
 if __name__ == "__main__":
     main()
