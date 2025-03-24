@@ -1,7 +1,7 @@
 
 # CMS Level-1 Trigger Simulation
 
-![Simulation Screenshot](data/trigger_rate_example.png)  
+![Simulation Screenshot](data/trigger_rate_20250321_133027.png)  
 *Example output: Trigger acceptance rate over time from a 500-event simulation.*
 
 ## Overview
