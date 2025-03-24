@@ -10,23 +10,31 @@
 #include <memory>
 #include <cmath>
 #include <algorithm>
+#include <fstream>
 
 namespace CMSL1Sim {
 
     enum DetectorType {
-        ECAL,    // Electromagnetic Calorimeter
-        HCAL,    // Hadronic Calorimeter
-        DET_MUON, // Renamed to avoid conflict (Detector Muon)
-        TRACKER  // Silicon Tracker
+        ECAL,
+        HCAL,
+        DET_MUON,
+        TRACKER
     };
 
     enum ParticleType {
         ELECTRON,
         PHOTON,
-        MUON,    // Particle Muon
+        MUON,
         JET,
         TAU,
-        MET      // Missing Transverse Energy
+        MET
+    };
+
+    enum ProcessType {
+        QCD,
+        SINGLE_LEP,
+        DILEP,
+        MULTIJET
     };
 
     struct TriggerCandidate {
@@ -36,6 +44,7 @@ namespace CMSL1Sim {
         double phi;
         double energy;
         bool isolated;
+        std::vector<std::pair<double, double>> trajectory; // (eta, phi) at each layer
         
         TriggerCandidate(ParticleType t, double p, double e, double ph, double en, bool iso = false)
             : type(t), pt(p), eta(e), phi(ph), energy(en), isolated(iso) {}
@@ -108,13 +117,15 @@ namespace CMSL1Sim {
         std::vector<TriggerCandidate> candidates;
         bool triggerDecision;
         std::chrono::nanoseconds timestamp;
+        ProcessType processType;
         
     public:
-        CollisionEvent(uint64_t id)
+        CollisionEvent(uint64_t id, ProcessType proc = QCD)
             : eventId(id), ecal(std::make_unique<ECALLayer>()),
               hcal(std::make_unique<HCALLayer>()), muon(std::make_unique<MuonLayer>()),
               tracker(std::make_unique<TrackerLayer>()), triggerDecision(false),
-              timestamp(std::chrono::high_resolution_clock::now().time_since_epoch()) {}
+              timestamp(std::chrono::high_resolution_clock::now().time_since_epoch()),
+              processType(proc) {}
         
         uint64_t getId() const { return eventId; }
         ECALLayer* getECAL() { return ecal.get(); }
@@ -129,6 +140,72 @@ namespace CMSL1Sim {
         bool passedTrigger() const { return triggerDecision; }
         
         std::chrono::nanoseconds getTimestamp() const { return timestamp; }
+        ProcessType getProcessType() const { return processType; }
+        
+        void saveToJSON(const std::string& filename) const {
+            std::ofstream out(filename);
+            out << "{\n";
+            out << "  \"id\": " << eventId << ",\n";
+            out << "  \"passed\": " << (triggerDecision ? "true" : "false") << ",\n";
+            out << "  \"process\": " << processType << ",\n";
+            out << "  \"detectors\": {\n";
+            out << "    \"ECAL\": [";
+            for (int i = 0; i < ecal->getEtaBins(); i++) {
+                out << (i > 0 ? "," : "") << "[";
+                for (int j = 0; j < ecal->getPhiBins(); j++) {
+                    out << (j > 0 ? "," : "") << ecal->getEnergy(i, j);
+                }
+                out << "]";
+            }
+            out << "],\n";
+            out << "    \"HCAL\": [";
+            for (int i = 0; i < hcal->getEtaBins(); i++) {
+                out << (i > 0 ? "," : "") << "[";
+                for (int j = 0; j < hcal->getPhiBins(); j++) {
+                    out << (j > 0 ? "," : "") << hcal->getEnergy(i, j);
+                }
+                out << "]";
+            }
+            out << "],\n";
+            out << "    \"MUON\": [";
+            for (int i = 0; i < muon->getEtaBins(); i++) {
+                out << (i > 0 ? "," : "") << "[";
+                for (int j = 0; j < muon->getPhiBins(); j++) {
+                    out << (j > 0 ? "," : "") << muon->getEnergy(i, j);
+                }
+                out << "]";
+            }
+            out << "],\n";
+            out << "    \"TRACKER\": [";
+            for (int i = 0; i < tracker->getEtaBins(); i++) {
+                out << (i > 0 ? "," : "") << "[";
+                for (int j = 0; j < tracker->getPhiBins(); j++) {
+                    out << (j > 0 ? "," : "") << tracker->getEnergy(i, j);
+                }
+                out << "]";
+            }
+            out << "]\n";
+            out << "  },\n";
+            out << "  \"candidates\": [";
+            for (size_t i = 0; i < candidates.size(); i++) {
+                const auto& cand = candidates[i];
+                out << (i > 0 ? "," : "") << "{";
+                out << "\"type\": " << cand.type << ",";
+                out << "\"pt\": " << cand.pt << ",";
+                out << "\"eta\": " << cand.eta << ",";
+                out << "\"phi\": " << cand.phi << ",";
+                out << "\"energy\": " << cand.energy << ",";
+                out << "\"isolated\": " << (cand.isolated ? "true" : "false") << ",";
+                out << "\"trajectory\": [";
+                for (size_t j = 0; j < cand.trajectory.size(); j++) {
+                    out << (j > 0 ? "," : "") << "[" << cand.trajectory[j].first << "," << cand.trajectory[j].second << "]";
+                }
+                out << "]}";
+            }
+            out << "]\n";
+            out << "}\n";
+            out.close();
+        }
     };
 
     class TriggerLogic {
@@ -141,6 +218,8 @@ namespace CMSL1Sim {
         virtual ~TriggerLogic() = default;
         virtual bool evaluate(const CollisionEvent& event) = 0;
         std::string getName() const { return name; }
+        void setPtThreshold(double pt) { ptThreshold = pt; }
+        double getPtThreshold() const { return ptThreshold; }
     };
 
     class SingleMuonLogic : public TriggerLogic {
@@ -224,11 +303,11 @@ namespace CMSL1Sim {
                 
                 std::cout << "Event " << event->getId() << (passed ? " PASSED" : " REJECTED") 
                           << " | Candidates: " << event->getCandidates().size() << std::endl;
+                event->saveToJSON("data/event_" + std::to_string(event->getId()) + ".json");
             }
         }
         
         void reconstructCandidates(CollisionEvent& event) {
-            // Muon reconstruction
             auto* muonLayer = event.getMuon();
             for (int eta = 0; eta < muonLayer->getEtaBins(); eta++) {
                 for (int phi = 0; phi < muonLayer->getPhiBins(); phi++) {
@@ -237,12 +316,13 @@ namespace CMSL1Sim {
                         double etaVal = -2.4 + (4.8 * eta) / muonLayer->getEtaBins();
                         double phiVal = -M_PI + (2 * M_PI * phi) / muonLayer->getPhiBins();
                         double pt = energy * std::sin(2 * std::atan(std::exp(-etaVal)));
-                        event.addCandidate(TriggerCandidate(ParticleType::MUON, pt, etaVal, phiVal, energy, true));
+                        TriggerCandidate cand(ParticleType::MUON, pt, etaVal, phiVal, energy, true);
+                        cand.trajectory.push_back({etaVal, phiVal}); // Simplified trajectory
+                        event.addCandidate(cand);
                     }
                 }
             }
             
-            // Jet reconstruction
             auto* hcal = event.getHCAL();
             std::vector<std::vector<double>> jetEnergy(hcal->getEtaBins(), 
                                                       std::vector<double>(hcal->getPhiBins(), 0.0));
@@ -275,13 +355,14 @@ namespace CMSL1Sim {
                             double etaVal = -4.7 + (9.4 * eta) / hcal->getEtaBins();
                             double phiVal = -M_PI + (2 * M_PI * phi) / hcal->getPhiBins();
                             double pt = jetEnergy[eta][phi] * std::sin(2 * std::atan(std::exp(-etaVal)));
-                            event.addCandidate(TriggerCandidate(ParticleType::JET, pt, etaVal, phiVal, jetEnergy[eta][phi]));
+                            TriggerCandidate cand(ParticleType::JET, pt, etaVal, phiVal, jetEnergy[eta][phi]);
+                            cand.trajectory.push_back({etaVal, phiVal});
+                            event.addCandidate(cand);
                         }
                     }
                 }
             }
             
-            // Electron/Photon reconstruction
             auto* ecal = event.getECAL();
             for (int eta = 0; eta < ecal->getEtaBins(); eta++) {
                 for (int phi = 0; phi < ecal->getPhiBins(); phi++) {
@@ -307,11 +388,10 @@ namespace CMSL1Sim {
                             }
                         }
                         
-                        if (hasTrack) {
-                            event.addCandidate(TriggerCandidate(ParticleType::ELECTRON, pt, etaVal, phiVal, energy, isolated));
-                        } else {
-                            event.addCandidate(TriggerCandidate(ParticleType::PHOTON, pt, etaVal, phiVal, energy, isolated));
-                        }
+                        TriggerCandidate cand(hasTrack ? ParticleType::ELECTRON : ParticleType::PHOTON, 
+                                             pt, etaVal, phiVal, energy, isolated);
+                        cand.trajectory.push_back({etaVal, phiVal});
+                        event.addCandidate(cand);
                     }
                 }
             }
@@ -378,13 +458,6 @@ namespace CMSL1Sim {
         std::mt19937 rng;
         uint64_t eventCounter;
         
-        enum ProcessType {
-            QCD,
-            SINGLE_LEP,
-            DILEP,
-            MULTIJET
-        };
-        
         void generateQCD(CollisionEvent& event) {
             std::uniform_int_distribution<int> nHits(20, 50);
             int hits = nHits(rng);
@@ -400,14 +473,14 @@ namespace CMSL1Sim {
             double phi = std::uniform_real_distribution<double>(-M_PI, M_PI)(rng);
             
             int etaBin, phiBin;
-            if (lepType(rng)) {  // Muon
+            if (lepType(rng)) {
                 etaBin = static_cast<int>((eta + 2.4) * event.getMuon()->getEtaBins() / 4.8);
                 phiBin = static_cast<int>((phi + M_PI) * event.getMuon()->getPhiBins() / (2 * M_PI));
                 event.getMuon()->depositEnergy(etaBin, phiBin, energy);
                 etaBin = static_cast<int>((eta + 2.5) * event.getTracker()->getEtaBins() / 5.0);
                 phiBin = static_cast<int>((phi + M_PI) * event.getTracker()->getPhiBins() / (2 * M_PI));
                 event.getTracker()->depositEnergy(etaBin, phiBin, energy * 0.1);
-            } else {  // Electron
+            } else {
                 etaBin = static_cast<int>((eta + 2.5) * event.getECAL()->getEtaBins() / 5.0);
                 phiBin = static_cast<int>((phi + M_PI) * event.getECAL()->getPhiBins() / (2 * M_PI));
                 event.getECAL()->depositEnergy(etaBin, phiBin, energy);
@@ -467,9 +540,10 @@ namespace CMSL1Sim {
         EventGenerator() : rng(std::random_device{}()), eventCounter(0) {}
         
         std::shared_ptr<CollisionEvent> generate() {
-            auto event = std::make_shared<CollisionEvent>(eventCounter++);
+            auto event = std::make_shared<CollisionEvent>(eventCounter);
             std::discrete_distribution<int> processDist({60, 20, 10, 10});
             ProcessType process = static_cast<ProcessType>(processDist(rng));
+            event->processType = process;
             
             switch (process) {
                 case QCD: generateQCD(*event); break;
@@ -477,6 +551,7 @@ namespace CMSL1Sim {
                 case DILEP: generateDilepton(*event); break;
                 case MULTIJET: generateMultijet(*event); break;
             }
+            eventCounter++;
             return event;
         }
     };
