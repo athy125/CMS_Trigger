@@ -141,13 +141,14 @@ namespace CMSL1Sim {
         
         std::chrono::nanoseconds getTimestamp() const { return timestamp; }
         ProcessType getProcessType() const { return processType; }
+        void setProcessType(ProcessType proc) { processType = proc; } // New setter
         
         void saveToJSON(const std::string& filename) const {
             std::ofstream out(filename);
             out << "{\n";
             out << "  \"id\": " << eventId << ",\n";
             out << "  \"passed\": " << (triggerDecision ? "true" : "false") << ",\n";
-            out << "  \"process\": " << processType << ",\n";
+            out << "  \"process\": " << static_cast<int>(processType) << ",\n";
             out << "  \"detectors\": {\n";
             out << "    \"ECAL\": [";
             for (int i = 0; i < ecal->getEtaBins(); i++) {
@@ -317,7 +318,7 @@ namespace CMSL1Sim {
                         double phiVal = -M_PI + (2 * M_PI * phi) / muonLayer->getPhiBins();
                         double pt = energy * std::sin(2 * std::atan(std::exp(-etaVal)));
                         TriggerCandidate cand(ParticleType::MUON, pt, etaVal, phiVal, energy, true);
-                        cand.trajectory.push_back({etaVal, phiVal}); // Simplified trajectory
+                        cand.trajectory.push_back({etaVal, phiVal});
                         event.addCandidate(cand);
                     }
                 }
@@ -543,7 +544,7 @@ namespace CMSL1Sim {
             auto event = std::make_shared<CollisionEvent>(eventCounter);
             std::discrete_distribution<int> processDist({60, 20, 10, 10});
             ProcessType process = static_cast<ProcessType>(processDist(rng));
-            event->processType = process;
+            event->setProcessType(process); // Use setter instead of direct access
             
             switch (process) {
                 case QCD: generateQCD(*event); break;
