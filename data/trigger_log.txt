@@ -1,0 +1,11 @@
+[2025-03-21 13:30:24] Running simulation with command: ./cms_l1_trigger_sim 500
+[2025-03-21 13:30:24] Starting live output parsing
+[2025-03-21 13:30:27] Live output parsing completed
+[2025-03-21 13:30:27] Simulation completed successfully
+[2025-03-21 13:30:27] Saved trigger rate plot to ./data/trigger_rate_20250321_133027.png
+[2025-03-21 13:30:28] Saved trigger distribution plot to ./data/trigger_distribution_20250321_133027.png
+[2025-03-21 13:30:28] Exported statistics to ./data/trigger_stats_20250321_133028.csv
+2025-03-24 06:23:44,888 - Running simulation with ./cms_l1_trigger_sim for 500 events
+2025-03-24 06:25:45,672 - Statistics saved to data/trigger_stats_20250324_062545.csv
+2025-03-24 06:26:16,917 - Statistics saved to data/trigger_stats_20250324_062616.csv
+2025-03-24 06:26:43,236 - Statistics saved to data/trigger_stats_20250324_062643.csv
